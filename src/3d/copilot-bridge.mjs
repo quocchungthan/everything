@@ -1,44 +1,48 @@
-import { createServer } from 'node:http';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { CopilotClient } from '@github/copilot-sdk';
-
-const HOST = '127.0.0.1';
-const PORT = Number(process.env.COPILOT_BRIDGE_PORT || 4174);
-const COPILOT_HOME = process.env.COPILOT_HOME || join(homedir(), '.copilot');
+/**
+ * Vite plugin: serves the AI assistant's GitHub Copilot bridge from the dev and preview servers at
+ * /api/copilot, so `npm run dev` is all that is needed. It drives the Copilot runtime bundled with
+ * @github/copilot-sdk using the Copilot CLI login already stored on this computer.
+ *
+ * Only loopback clients may use it (the dev server listens on every interface), and POSTs must be
+ * same-origin JSON so other web pages cannot drive the user's Copilot account.
+ */
+const ROUTE = '/api/copilot';
 const MAX_BODY = 32 * 1024 * 1024;
-const pendingTools = new Map();
-const client = new CopilotClient({
-  mode: 'empty',
-  baseDirectory: COPILOT_HOME,
-  logLevel: 'error',
-  env: { ...process.env, COPILOT_GITHUB_TELEMETRY_DISABLED: 'true' },
-});
-let startupError = '';
 
-function loopback(hostname) {
-  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+// The default ("copilot-cli") client mode is required: "empty" mode disables the OS credential store
+// where the Copilot CLI keeps its login. These options apply empty mode's sandboxing per session.
+const SANDBOX = {
+  enableSessionTelemetry: false,
+  skipCustomInstructions: true,
+  enableOnDemandInstructionDiscovery: false,
+  enableFileHooks: false,
+  enableHostGitOperations: false,
+  enableSessionStore: false,
+  enableSkills: false,
+  includedBuiltinSkills: [],
+  skipEmbeddingRetrieval: true,
+  memory: { enabled: false },
+  customAgentsLocalOnly: true,
+  coauthorEnabled: false,
+  manageScheduleEnabled: false,
+};
+
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
 }
 
-function allowedOrigin(value) {
-  if (typeof value !== 'string') return false;
-  if (process.env.COPILOT_BRIDGE_ORIGINS) return process.env.COPILOT_BRIDGE_ORIGINS.split(',').map((x) => x.trim()).includes(value);
+function loopbackAddress(address) {
+  return typeof address === 'string' && (address === '::1' || /^(::ffff:)?127(?:\.\d{1,3}){3}$/.test(address));
+}
+
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
   try {
-    const origin = new URL(value);
-    return ['http:', 'https:'].includes(origin.protocol) && loopback(origin.hostname) && ['5173', '4173'].includes(origin.port || (origin.protocol === 'https:' ? '443' : '80'));
+    return new URL(origin).host === req.headers.host;
   } catch {
     return false;
   }
-}
-
-function setCors(req, res) {
-  const origin = req.headers.origin;
-  if (!allowedOrigin(origin)) return false;
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Vary', 'Origin');
-  return true;
 }
 
 function sendJson(res, status, value) {
@@ -47,17 +51,18 @@ function sendJson(res, status, value) {
 }
 
 async function readJson(req) {
+  if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw httpError(415, 'Request body must be JSON.');
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY) throw Object.assign(new Error('Request exceeds the 32 MB limit.'), { status: 413 });
+    if (size > MAX_BODY) throw httpError(413, 'Request exceeds the 32 MB limit.');
     chunks.push(chunk);
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw Object.assign(new Error('Request body must be valid JSON.'), { status: 400 });
+    throw httpError(400, 'Request body must be valid JSON.');
   }
 }
 
@@ -65,11 +70,11 @@ function sse(res, event, data) {
   if (!res.destroyed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-function chatPayload(body) {
-  if (!Array.isArray(body.messages) || body.messages.length > 256) throw Object.assign(new Error('Invalid chat messages.'), { status: 400 });
-  if (!Array.isArray(body.tools) || body.tools.length > 64) throw Object.assign(new Error('Invalid tool definitions.'), { status: 400 });
+export function chatPayload(body) {
+  if (!Array.isArray(body?.messages) || body.messages.length > 256) throw httpError(400, 'Invalid chat messages.');
+  if (!Array.isArray(body.tools) || body.tools.length > 64) throw httpError(400, 'Invalid tool definitions.');
   const system = body.messages.find((m) => m?.role === 'system')?.content;
-  if (typeof system !== 'string') throw Object.assign(new Error('The assistant system prompt is missing.'), { status: 400 });
+  if (typeof system !== 'string') throw httpError(400, 'The assistant system prompt is missing.');
 
   const attachments = [];
   const lines = [];
@@ -103,9 +108,11 @@ function chatPayload(body) {
   const tools = body.tools.map((tool) => {
     const fn = tool?.function;
     if (tool?.type !== 'function' || typeof fn?.name !== 'string' || !/^[\w.-]{1,80}$/.test(fn.name) || typeof fn.description !== 'string' || !fn.parameters || typeof fn.parameters !== 'object') {
-      throw Object.assign(new Error('A tool definition is invalid.'), { status: 400 });
+      throw httpError(400, 'A tool definition is invalid.');
     }
-    return { name: fn.name, description: fn.description, parameters: fn.parameters };
+    // The app runs and confirms tools itself; deferred tools would sit behind a tool-search tool
+    // that the allowlist below excludes.
+    return { name: fn.name, description: fn.description, parameters: fn.parameters, defer: 'never', skipPermission: true };
   });
   return {
     system,
@@ -116,158 +123,151 @@ function chatPayload(body) {
   };
 }
 
-async function handleChat(req, res) {
-  const body = await readJson(req);
-  const input = chatPayload(body);
-  if (startupError) throw Object.assign(new Error(`Copilot runtime could not start: ${startupError}`), { status: 503 });
+function createBridge(logger) {
+  const pendingTools = new Map();
+  let clientPromise = null;
 
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-store, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  res.flushHeaders();
-  let session;
-  let closed = false;
-  let streamedText = false;
-  res.on('close', () => {
-    if (!res.writableEnded) {
-      closed = true;
-      if (session) void session.abort().catch(() => {});
-    }
-  });
-
-  try {
-    const names = input.tools.map((tool) => `custom:${tool.name}`);
-    session = await client.createSession({
-      model: input.model,
-      streaming: true,
-      systemMessage: { mode: 'append', content: input.system },
-      tools: input.tools,
-      availableTools: names,
-      enableSessionTelemetry: false,
+  // Started on first use so the dev server starts instantly, and dropped after a failure or a
+  // signed-out status so "Retry connection" picks up a fresh `copilot login` without a restart.
+  function client() {
+    clientPromise ??= (async () => {
+      const { CopilotClient } = await import('@github/copilot-sdk');
+      const c = new CopilotClient({
+        logLevel: 'error',
+        useLoggedInUser: true,
+        env: { ...process.env, COPILOT_GITHUB_TELEMETRY_DISABLED: 'true' },
+      });
+      await c.start();
+      return c;
+    })();
+    clientPromise.catch(() => {
+      clientPromise = null;
     });
-    session.on('assistant.message_delta', (event) => {
-      if (!event.agentId && typeof event.data.deltaContent === 'string' && event.data.deltaContent) {
-        streamedText = true;
-        sse(res, 'text', { text: event.data.deltaContent });
+    return clientPromise;
+  }
+
+  async function reset() {
+    const current = clientPromise;
+    clientPromise = null;
+    if (current) await current.then((c) => c.stop()).catch(() => {});
+  }
+
+  async function health(res) {
+    try {
+      const auth = await (await client()).getAuthStatus();
+      const authenticated = auth.isAuthenticated === true;
+      if (!authenticated) await reset();
+      sendJson(res, 200, { available: true, authenticated, ...(authenticated ? { login: auth.login } : {}) });
+    } catch (error) {
+      await reset();
+      sendJson(res, 200, { available: false, authenticated: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function chat(req, res) {
+    const input = chatPayload(await readJson(req));
+    let c;
+    try {
+      c = await client();
+    } catch (error) {
+      throw httpError(503, `The Copilot runtime could not start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    let session;
+    let closed = false;
+    let streamedText = false;
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        closed = true;
+        if (session) void session.abort().catch(() => {});
       }
     });
-    session.on('external_tool.requested', (event) => {
-      const data = event.data;
-      pendingTools.set(data.requestId, session);
-      sse(res, 'tool', data);
-    });
 
-    const response = await session.sendAndWait({ prompt: input.prompt, attachments: input.attachments }, 180000);
-    if (!streamedText && response?.data.content) sse(res, 'text', { text: response.data.content });
-    if (!closed) sse(res, 'done', {});
-    if (!res.writableEnded) res.end();
-  } catch (error) {
-    if (!closed) {
-      sse(res, 'error', { message: error instanceof Error ? error.message : String(error) });
-      res.end();
-    }
-  } finally {
-    for (const [requestId, owner] of pendingTools) if (owner === session) pendingTools.delete(requestId);
-    if (session) await session.disconnect().catch(() => {});
-  }
-}
-
-const server = createServer(async (req, res) => {
-  let hostname = '';
-  try {
-    hostname = new URL(`http://${req.headers.host}`).hostname;
-  } catch {
-    sendJson(res, 400, { error: 'Invalid host header.' });
-    return;
-  }
-  if (!loopback(hostname)) {
-    sendJson(res, 403, { error: 'The Copilot bridge is local-only.' });
-    return;
-  }
-  if (!setCors(req, res)) {
-    sendJson(res, 403, { error: 'This browser origin is not allowed to use the local Copilot bridge.' });
-    return;
-  }
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  const path = new URL(req.url || '/', 'http://localhost').pathname;
-  if (req.method === 'GET' && path === '/health') {
-    if (startupError) {
-      sendJson(res, 503, { available: false, authenticated: false });
-      return;
-    }
     try {
-      const auth = await client.getAuthStatus();
-      sendJson(res, 200, { available: true, authenticated: auth.isAuthenticated === true });
-    } catch {
-      sendJson(res, 503, { available: false, authenticated: false });
-    }
-    return;
-  }
-  if (req.method === 'POST' && path === '/chat') {
-    try {
-      await handleChat(req, res);
+      session = await c.createSession({
+        ...SANDBOX,
+        model: input.model,
+        streaming: true,
+        systemMessage: { mode: 'customize', content: input.system, sections: { environment_context: { action: 'remove' } } },
+        tools: input.tools,
+        availableTools: input.tools.map((tool) => `custom:${tool.name}`),
+      });
+      session.on('assistant.message_delta', (event) => {
+        if (!event.agentId && typeof event.data.deltaContent === 'string' && event.data.deltaContent) {
+          streamedText = true;
+          sse(res, 'text', { text: event.data.deltaContent });
+        }
+      });
+      session.on('external_tool.requested', (event) => {
+        pendingTools.set(event.data.requestId, session);
+        sse(res, 'tool', event.data);
+      });
+
+      const response = await session.sendAndWait({ prompt: input.prompt, attachments: input.attachments }, 180000);
+      if (!streamedText && response?.data.content) sse(res, 'text', { text: response.data.content });
+      if (!closed) sse(res, 'done', {});
+      if (!res.writableEnded) res.end();
     } catch (error) {
+      if (!closed) {
+        sse(res, 'error', { message: error instanceof Error ? error.message : String(error) });
+        res.end();
+      }
+    } finally {
+      for (const [requestId, owner] of pendingTools) if (owner === session) pendingTools.delete(requestId);
+      if (session) await session.disconnect().catch(() => {});
+    }
+  }
+
+  async function toolResult(req, res) {
+    const body = await readJson(req);
+    const session = pendingTools.get(body?.requestId);
+    if (!session) throw httpError(404, 'This tool request is no longer pending.');
+    const result = body.result || {};
+    const image = typeof result.image === 'string' ? /^data:(image\/[^;,]+);base64,(.*)$/.exec(result.image) : null;
+    const payload = {
+      textResultForLlm: String(result.content || ''),
+      resultType: result.ok === false ? 'failure' : 'success',
+      ...(result.ok === false ? { error: String(result.content || 'Tool failed.') } : {}),
+      ...(image ? { binaryResultsForLlm: [{ type: 'image', data: image[2], mimeType: image[1], description: 'Scene viewport screenshot' }] } : {}),
+    };
+    const handled = await session.rpc.tools.handlePendingToolCall({ requestId: body.requestId, result: payload });
+    pendingTools.delete(body.requestId);
+    if (!handled.success) throw httpError(409, 'Copilot no longer accepts this tool result.');
+    sendJson(res, 200, { ok: true });
+  }
+
+  async function handle(req, res) {
+    try {
+      if (!loopbackAddress(req.socket.remoteAddress)) throw httpError(403, 'The Copilot bridge only accepts requests from this computer.');
+      const path = new URL(req.url || '/', 'http://localhost').pathname;
+      if (req.method === 'GET' && path === '/health') return await health(res);
+      if (req.method !== 'POST') throw httpError(404, 'Not found.');
+      if (!sameOrigin(req)) throw httpError(403, 'Cross-origin requests are not allowed.');
+      if (path === '/chat') return await chat(req, res);
+      if (path === '/tool-result') return await toolResult(req, res);
+      throw httpError(404, 'Not found.');
+    } catch (error) {
+      if (!error.status) logger.error(`[copilot] ${error.stack || error}`);
       if (!res.headersSent) sendJson(res, error.status || 500, { error: error.message || 'The Copilot bridge failed.' });
+      else if (!res.writableEnded) res.end();
     }
-    return;
   }
-  if (req.method === 'POST' && path === '/tool-result') {
-    try {
-      const body = await readJson(req);
-      const session = pendingTools.get(body.requestId);
-      if (!session) {
-        sendJson(res, 404, { error: 'This tool request is no longer pending.' });
-        return;
-      }
-      const result = body.result || {};
-      const image = typeof result.image === 'string' ? /^data:(image\/[^;,]+);base64,(.*)$/.exec(result.image) : null;
-      const payload = {
-        textResultForLlm: String(result.content || ''),
-        resultType: result.ok === false ? 'failure' : 'success',
-        ...(result.ok === false ? { error: String(result.content || 'Tool failed.') } : {}),
-        ...(image ? { binaryResultsForLlm: [{ type: 'image', data: image[2], mimeType: image[1], description: 'Scene viewport screenshot' }] } : {}),
-      };
-      const handled = await session.rpc.tools.handlePendingToolCall({ requestId: body.requestId, result: payload });
-      pendingTools.delete(body.requestId);
-      if (!handled.success) {
-        sendJson(res, 409, { error: 'Copilot no longer accepts this tool result.' });
-        return;
-      }
-      sendJson(res, 200, { ok: true });
-    } catch (error) {
-      sendJson(res, error.status || 500, { error: error.message || 'Could not submit the tool result.' });
-    }
-    return;
-  }
-  sendJson(res, 404, { error: 'Not found.' });
-});
 
-try {
-  await client.start();
-} catch (error) {
-  startupError = error instanceof Error ? error.message : String(error);
-  console.error(`Copilot bridge runtime failed to start: ${startupError}`);
+  return { handle, close: reset };
 }
-server.listen(PORT, HOST, () => {
-  console.log(`Local Copilot bridge listening on http://${HOST}:${PORT}`);
-  if (!startupError) {
-    void client.getAuthStatus().then((auth) => {
-      console.log(auth.isAuthenticated ? 'Copilot CLI authentication is ready.' : 'Sign in with `copilot auth login` before using the assistant.');
-    }).catch(() => console.log('Copilot CLI authentication status is unavailable.'));
-  }
-});
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    server.close();
-    void client.stop().finally(() => process.exit(0));
-  });
+export default function copilotBridge() {
+  function attach(server) {
+    const bridge = createBridge(server.config.logger);
+    server.middlewares.use(ROUTE, (req, res) => void bridge.handle(req, res));
+    server.httpServer?.on('close', () => void bridge.close());
+  }
+  return { name: 'copilot-bridge', configureServer: attach, configurePreviewServer: attach };
 }

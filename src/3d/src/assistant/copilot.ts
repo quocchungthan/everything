@@ -1,19 +1,21 @@
 import { prefs } from '../app/prefs';
 import type { ChatFn, ChatMessage, ChatOptions, StreamPart } from './ai';
 
-const BRIDGE = 'http://127.0.0.1:4174';
+// Served by the dev/preview server (copilot-bridge.mjs), so the app needs no separate process.
+const BRIDGE = '/api/copilot';
 
 export interface CopilotStatus {
   available: boolean;
   authenticated?: boolean;
+  error?: string;
 }
 
 export async function copilotStatus(): Promise<CopilotStatus> {
   try {
-    const response = await fetch(`${BRIDGE}/health`);
-    if (!response.ok) return { available: false };
-    const status = (await response.json()) as { authenticated?: boolean };
-    return { available: true, authenticated: status.authenticated === true };
+    const response = await fetch(`${BRIDGE}/health`, { cache: 'no-store' });
+    if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return { available: false };
+    const status = (await response.json()) as { available?: boolean; authenticated?: boolean; error?: string };
+    return { available: status.available === true, authenticated: status.authenticated === true, error: status.error };
   } catch {
     return { available: false };
   }
@@ -42,13 +44,19 @@ export const copilotChat: ChatFn = async function* (messages: ChatMessage[], opt
     });
   } catch (e) {
     if (opts.signal?.aborted) return;
-    throw new Error(`Cannot connect to the local Copilot bridge. Start it with \`npm run copilot:bridge\`. ${(e as Error).message}`);
+    throw new Error(`Cannot reach the Copilot bridge. Run the app with \`npm run dev\` or \`npm run preview\`. ${(e as Error).message}`);
   }
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `The local Copilot bridge returned HTTP ${response.status}.`);
+    let message = body;
+    try {
+      message = (JSON.parse(body) as { error?: string }).error ?? body;
+    } catch {
+      // not JSON; show the raw body
+    }
+    throw new Error(message || `The Copilot bridge returned HTTP ${response.status}.`);
   }
-  if (!response.body) throw new Error('The local Copilot bridge did not provide a response stream.');
+  if (!response.body) throw new Error('The Copilot bridge did not provide a response stream.');
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -95,5 +103,5 @@ export const copilotChat: ChatFn = async function* (messages: ChatMessage[], opt
   } finally {
     reader.releaseLock();
   }
-  if (!complete && !opts.signal?.aborted) throw new Error('The local Copilot bridge closed before completing the response.');
+  if (!complete && !opts.signal?.aborted) throw new Error('The Copilot bridge closed before completing the response.');
 };

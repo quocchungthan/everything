@@ -4,6 +4,7 @@ import { copyFile, mkdir } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puterLocalhost from '../../dev/puter-localhost.mjs';
+import copilotBridge from './copilot-bridge.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const pyodidePackage = resolve(root, 'node_modules/pyodide');
@@ -31,5 +32,5 @@ function localPyodide() {
 }
 
 export default defineConfig({
-  plugins: [puterLocalhost('3d'), localPyodide()],
+  plugins: [puterLocalhost('3d'), localPyodide(), copilotBridge()],
 });

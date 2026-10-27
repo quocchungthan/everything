@@ -324,22 +324,27 @@ export class AssistantPanel {
     if (!on) this.status.textContent = '';
   }
 
-  /** Whether the local Copilot bridge is available; otherwise explains how to connect. */
+  /** Whether the Copilot bridge is available; otherwise explains how to connect. */
   private async ready(): Promise<boolean> {
     if (this.chat || devChat()) return true;
     if (!prefs.use_online_access) {
       this.notice('Copilot needs internet access. Turn on Allow Online Access in Preferences ▸ System ▸ Network.');
       return false;
     }
-    this.status.textContent = 'Checking local Copilot…';
+    this.status.textContent = 'Checking Copilot…';
     const status = await copilotStatus();
     this.status.textContent = '';
     if (!status.available) {
-      this.notice('The local Copilot bridge is not running. Start it with `npm run copilot:bridge` in the 3D project directory.', this.retryConnectionButton());
+      this.notice(
+        status.error
+          ? `The Copilot runtime could not start: ${status.error}`
+          : 'The Copilot bridge is unavailable. Open the app from `npm run dev` or `npm run preview` on this computer.',
+        this.retryConnectionButton(),
+      );
       return false;
     }
     if (!status.authenticated) {
-      this.notice('Copilot CLI is not signed in. Run `copilot auth login` in a terminal, then restart the local bridge.', this.retryConnectionButton());
+      this.notice('Copilot CLI is not signed in. Run `copilot login` in a terminal, then retry.', this.retryConnectionButton());
       return false;
     }
     return true;

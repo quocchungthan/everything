@@ -17,11 +17,12 @@ Firefox or Safari).
 ```sh
 npm ci
 npm run dev          # open the printed URL
-npm run copilot:bridge  # in another terminal, for the AI assistant
 ```
 
-The assistant uses the GitHub Copilot CLI credentials already signed in on this computer. Its
-local bridge and runtime are included with the npm dependencies; model requests still require
+The assistant uses the GitHub Copilot CLI credentials already signed in on this computer (run
+`copilot login` once if needed). `npm run dev` and `npm run preview` serve its Copilot bridge at
+`/api/copilot` to this computer only, using the runtime included with the npm dependencies, so there
+is nothing else to start. A static deployment of `dist/` has no bridge. Model requests still require
 internet access and send your prompts, scene details, screenshots and attached files to GitHub
 Copilot. The editor and its built-in Python runtime work offline.
 
