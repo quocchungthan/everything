@@ -6,7 +6,7 @@ import { activeView3D, type View3D } from '../../editors/view3d/view3d';
 import { h } from '../../ui/h';
 import type { ArmatureData, Bone, ObjectData, PoseBone } from '../../data/types';
 import { transformProviders, startTransform, type TElement } from '../../ops/transform';
-import { defaultPoseBone, boneRestMatrix } from '../../eval/armature';
+import { defaultPoseBone, boneRestMatrix, ensurePose } from '../../eval/armature';
 import { setRotationFromQuaternion, poseBoneMatrix } from '../../eval/transform';
 import { modeMenus } from '../../editors/view3d/modemenus';
 import { addKeys } from '../../app/keymap';
@@ -495,12 +495,6 @@ function newBone(arm: ArmatureData, name: string, head: number[], tail: number[]
   const b = newBoneLike(arm, name, head, tail, par, connect, template);
   if (parent && !par) b.parent = parent;
   return b;
-}
-
-function ensurePose(ob: ObjectData, arm: ArmatureData) {
-  ob.pose ??= {};
-  for (const b of arm.bones) ob.pose[b.name] ??= defaultPoseBone();
-  for (const k of Object.keys(ob.pose)) if (!arm.bones.some((b) => b.name === k)) delete ob.pose[k];
 }
 
 function renameBone(ob: ObjectData, arm: ArmatureData, oldName: string, newName: string) {

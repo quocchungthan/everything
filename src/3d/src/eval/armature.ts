@@ -58,6 +58,12 @@ export function defaultPoseBone(): PoseBone {
   };
 }
 
+export function ensurePose(ob: ObjectData, arm: ArmatureData) {
+  ob.pose ??= {};
+  for (const b of arm.bones) ob.pose[b.name] ??= defaultPoseBone();
+  for (const k of Object.keys(ob.pose)) if (!arm.bones.some((b) => b.name === k)) delete ob.pose[k];
+}
+
 export function sortedBones(arm: ArmatureData): Bone[] {
   const byName = new Map(arm.bones.map((b) => [b.name, b]));
   const out: Bone[] = [],

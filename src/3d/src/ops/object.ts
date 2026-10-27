@@ -16,7 +16,7 @@ import { openMenu, promptText } from '../ui/menu';
 import { newConstraint } from '../eval/constraints';
 import { modeHandlers } from './modes';
 import { curvePoints, edgeChains, surfaceCenter, translateCurve, volumeCenter } from '../object/core';
-import { defaultPoseBone } from '../eval/armature';
+import { defaultPoseBone, ensurePose } from '../eval/armature';
 import { newModifier } from '../eval/modifiers';
 import { textToCurves } from '../eval/text';
 
@@ -275,6 +275,12 @@ export function setMode(doc: DocumentData, mode: Mode): boolean {
   // leave current mode
   const leave = modeHandlers[doc.mode]?.exit;
   if (leave) leave();
+  if (doc.mode === 'EDIT') {
+    const editedArmatures = new Set(app.editObjects().filter((o) => o.type === 'ARMATURE' && o.data).map((o) => o.data!));
+    for (const o of Object.values(doc.objects)) {
+      if (o.type === 'ARMATURE' && o.data && editedArmatures.has(o.data) && doc.armatures[o.data]) ensurePose(o, doc.armatures[o.data]);
+    }
+  }
   if (mode !== 'OBJECT' && ob) {
     const enter = modeHandlers[mode]?.enter;
     if (enter && !enter(ob)) {

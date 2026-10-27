@@ -160,6 +160,53 @@ describe('data-blocks', () => {
     ).toBe('2 Bone 2\nIK true\npose.bones["Bone"].rotation_euler\nnot in edit mode');
   });
 
+  it('animates newly scripted bones after leaving Edit Mode for Object Mode', () => {
+    run(`
+      const data = D.armatures.new('Dance');
+      const arm = D.objects.new('Dancer', data); C.collection.objects.link(arm);
+      C.view_layer.objects.active = arm; arm.select_set(true);
+      bpy.ops.object.mode_set({mode: 'EDIT'});
+      const hips = data.edit_bones.new('Hips'); hips.head = [0, 0, 1]; hips.tail = [0, 0, 1.2];
+      const spine = data.edit_bones.new('Spine'); spine.head = [0, 0, 1.2]; spine.tail = [0, 0, 1.5]; spine.parent = hips;
+      bpy.ops.object.mode_set({mode: 'OBJECT'});
+      const pb = arm.pose.bones.get('Hips');
+      pb.location = [0, 0, 0]; pb.keyframe_insert('location', {frame: 1});
+      pb.location = [0.2, 0, 0]; pb.keyframe_insert('location', {frame: 13});
+      pb.location = [0, 0, 0]; pb.keyframe_insert('location', {frame: 25});
+      print(arm.pose.bones.length, arm.pose.bones['Spine'].parent.name);
+    `);
+    expect(output.lines.map((l) => l.text)).toEqual(['2 Hips']);
+    const arm = obj('Dancer');
+    app.setFrame(13);
+    app.flush();
+    expect(arm.pose!.Hips.location[0]).toBeCloseTo(0.2);
+    app.setFrame(25);
+    app.flush();
+    expect(arm.pose!.Hips.location).toEqual([0, 0, 0]);
+  });
+
+  it('synchronizes shared armatures without resetting existing poses', () => {
+    expect(
+      run(`
+        bpy.ops.object.armature_add();
+        const arm = C.object;
+        arm.pose.bones['Bone'].location.x = 0.3;
+        bpy.ops.object.mode_set({mode: 'EDIT'});
+        arm.data.edit_bones.new('Removed');
+        bpy.ops.object.mode_set({mode: 'POSE'});
+        const shared = D.objects.new('Shared', arm.data); C.collection.objects.link(shared);
+        bpy.ops.object.mode_set({mode: 'EDIT'});
+        arm.data.edit_bones.remove(arm.data.edit_bones['Removed']);
+        arm.data.edit_bones.new('Hips');
+        bpy.ops.object.mode_set({mode: 'OBJECT'});
+        print(arm.pose.bones['Bone'].location.x, arm.pose.bones.length, shared.pose.bones.length);
+        print(arm.pose.bones.get('Removed'), shared.pose.bones['Hips'].location.x);
+      `),
+    ).toBe('0.3 2 2\nnull 0');
+    expect(obj('Armature').pose).not.toHaveProperty('Removed');
+    expect(obj('Shared').pose!.Hips).not.toBe(obj('Armature').pose!.Hips);
+  });
+
   it('sequencer strips, view layer passes and render settings', () => {
     expect(
       run(`
