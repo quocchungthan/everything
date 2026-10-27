@@ -46,6 +46,7 @@ import { uiState } from '../app/prefs';
 import { scriptFile, scriptFileNames } from './files';
 import { NODE_TYPE_ENUM } from './nodetypes.gen';
 import { Matrix, Vector, mathutils } from './mathutils';
+import { vecN } from './bmesh_core';
 import { allSockets, getNodeType, nodeSockets, nodeTypes, socketDefault } from '../nodes/registry';
 import { ctxOf, makeNode } from '../nodes/tree';
 import { zoneItemsFor, pairWithOutput } from '../geonodes/zones/script';
@@ -298,6 +299,33 @@ idFactory.wrap = wrapId;
 // ---------------------------------------------------------------------------
 // Object
 
+/** Size of an object's evaluated geometry in its own space, before its scale. */
+function unscaledExtent(id: string): number[] {
+  ensureEvaluated();
+  const P = app.graph.get(id)?.mesh?.positions;
+  if (!P || !P.length) return [0, 0, 0];
+  const mn = [Infinity, Infinity, Infinity],
+    mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < P.length; i += 3)
+    for (let k = 0; k < 3; k++) {
+      mn[k] = Math.min(mn[k], P[i + k]);
+      mx[k] = Math.max(mx[k], P[i + k]);
+    }
+  return mn.map((m, k) => mx[k] - m);
+}
+
+function setDimensions(ob: ObjectData, id: string, dims: Record<number, number>) {
+  const extent = unscaledExtent(id);
+  const scale = [...ob.scale] as ObjectData['scale'];
+  for (const [k, d] of Object.entries(dims)) {
+    const i = Number(k);
+    if (!Number.isFinite(d)) throw pyError('TypeError', 'Object.dimensions: expected numbers');
+    if (extent[i] > 0) scale[i] = (Math.sign(scale[i]) || 1) * (Math.abs(d) / extent[i]);
+  }
+  ob.scale = scale;
+  touched();
+}
+
 export class ObjectStruct extends IDStruct {
   private get ob() {
     return this.__raw as unknown as ObjectData;
@@ -448,19 +476,19 @@ export class ObjectStruct extends IDStruct {
     touched();
   }
   get dimensions(): Vector {
-    ensureEvaluated();
-    const ev = app.graph.get(this.__id);
-    const P = ev?.mesh?.positions;
-    if (!P || !P.length) return new Vector([0, 0, 0]);
-    const mn = [Infinity, Infinity, Infinity],
-      mx = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < P.length; i += 3)
-      for (let k = 0; k < 3; k++) {
-        mn[k] = Math.min(mn[k], P[i + k]);
-        mx[k] = Math.max(mx[k], P[i + k]);
-      }
-    const s = this.ob.scale;
-    return new Vector([0, 1, 2].map((k) => (mx[k] - mn[k]) * Math.abs(s[k])));
+    return boundVector(
+      'VECTOR',
+      () => {
+        const s = this.ob.scale;
+        return unscaledExtent(this.__id).map((e, k) => e * Math.abs(s[k]));
+      },
+      (i, x) => setDimensions(this.ob, this.__id, { [i]: x }),
+    ) as Vector;
+  }
+  // Like Blender: changes the scale so the bounds get this size; axes with no extent keep their scale.
+  set dimensions(v: unknown) {
+    const [x, y, z] = vecN(v, 3, 'Object.dimensions');
+    setDimensions(this.ob, this.__id, { 0: x, 1: y, 2: z });
   }
   get active_material() {
     const slots = materialSlots(this.ob);

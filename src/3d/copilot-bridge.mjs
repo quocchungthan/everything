@@ -27,6 +27,41 @@ const SANDBOX = {
   manageScheduleEnabled: false,
 };
 
+/** A turn may run tools for a long time; it only fails when nothing happens for STALL_MS. */
+const STALL_MS = 180000;
+const TURN_LIMIT_MS = 30 * 60000;
+
+/**
+ * Sends the prompt and waits for the turn to finish. Unlike a fixed sendAndWait timeout, the stall
+ * clock restarts on every session event and stops while `busy()` (a tool the app is running or the
+ * user is confirming), so long multi-tool builds are not cut off.
+ */
+export async function runTurn(session, message, { busy = () => false, stallMs = STALL_MS, limitMs = TURN_LIMIT_MS, tick = 1000 } = {}) {
+  let last = Date.now();
+  let stalled = false;
+  const unsubscribe = session.on(() => {
+    last = Date.now();
+  });
+  const watchdog = setInterval(() => {
+    if (busy()) last = Date.now();
+    else if (!stalled && Date.now() - last > stallMs) {
+      stalled = true;
+      void Promise.resolve(session.abort()).catch(() => {});
+    }
+  }, Math.min(tick, stallMs));
+  try {
+    const response = await session.sendAndWait(message, limitMs);
+    if (stalled) throw new Error(`Copilot stopped responding: nothing happened for ${Math.round(stallMs / 1000)} s.`);
+    return response;
+  } catch (error) {
+    if (stalled) throw new Error(`Copilot stopped responding: nothing happened for ${Math.round(stallMs / 1000)} s.`);
+    throw error;
+  } finally {
+    clearInterval(watchdog);
+    unsubscribe();
+  }
+}
+
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
@@ -210,7 +245,10 @@ function createBridge(logger) {
         sse(res, 'tool', event.data);
       });
 
-      const response = await session.sendAndWait({ prompt: input.prompt, attachments: input.attachments }, 180000);
+      const owned = session;
+      const response = await runTurn(session, { prompt: input.prompt, attachments: input.attachments }, {
+        busy: () => [...pendingTools.values()].includes(owned),
+      });
       if (!streamedText && response?.data.content) sse(res, 'text', { text: response.data.content });
       if (!closed) sse(res, 'done', {});
       if (!res.writableEnded) res.end();

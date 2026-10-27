@@ -299,6 +299,18 @@ describe('object helpers', () => {
     `),
     ).toBe('-1,-1,-1 1,1,1\nFINISHED Cube.001 0');
   });
+
+  it('dimensions can be set, as a whole or per axis, by rescaling', () => {
+    expect(
+      run(`
+      const ob = D.objects['Cube'];
+      ob.scale = [-1, 1, 1];
+      ob.dimensions = [4, 1, 2];
+      ob.dimensions.z = 6;
+      print([...ob.scale].map((s) => +s.toFixed(3)).join(','), [...ob.dimensions].map((d) => +d.toFixed(3)).join(','));
+    `),
+    ).toBe('-2,0.5,3 4,1,6');
+  });
 });
 
 describe('properties added to data types', () => {

@@ -128,6 +128,9 @@ describe('reading the scene', () => {
     expect(expr.content).toMatch(/- location = /);
     expect(expr.content).toMatch(/Methods: .*keyframe_insert/);
     expect((await runTool(host, 'api_help', { topic: 'bpy.ops.mesh.nope' })).ok).toBe(false);
+    const extra = await runTool(host, 'api_help', { topic: 'bpy.ops.mesh.primitive_cylinder_add properties radius depth' });
+    expect(extra.ok).toBe(true);
+    expect(extra.content).toMatch(/- radius \(float.*\) = 1/);
   });
 
   it('offers the viewport tools only with a viewport', () => {

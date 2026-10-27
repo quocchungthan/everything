@@ -381,6 +381,15 @@ function apiHelp(topic: string, app: App): string {
   try {
     v = new Function(...Object.keys(g), `"use strict"; return (${t});`)(...Object.values(g));
   } catch (e) {
+    // Models often append words to a topic ("bpy.ops.export_scene.gltf properties filepath"): look up its first word.
+    const head = t.split(/\s+/)[0];
+    if (head && head !== t) {
+      try {
+        return `${apiHelp(head, app)}\n(Showing "${head}"; the rest of the topic was ignored.)`;
+      } catch {
+        // fall through to the original error
+      }
+    }
     throw new ToolError(`Could not evaluate ${t}: ${(e as Error).message}. Topics: ${Object.keys(GUIDES).map((k) => `"${k}"`).join(', ')}, "operators", "bpy.ops.<module>", "bpy.ops.<module>.<name>", "modifiers", "modifier <TYPE>", "constraints", "nodes <words>", "node <idname>", or an expression such as D.objects['Cube'].data.`);
   }
   if (v === null || v === undefined || typeof v !== 'object') return `${t} = ${formatValue(v)} (${v === null ? 'null' : typeof v})`;
